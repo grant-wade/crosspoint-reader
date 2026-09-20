@@ -7,6 +7,8 @@
 #include <string>
 #include <utility>
 
+#include "activities/reader/ReaderPageCache.h"
+
 struct Pod {
   uint32_t value;
   uint8_t flag;
@@ -115,5 +117,35 @@ int main() {
   auto* released = pod.release();
   assert(!pod && released[1].value == 42);
   HalMemory::freePsram(released);
+  assert(liveAllocations == 0);
+
+  {
+    ReaderPageCache cache;
+    constexpr size_t frameBytes = 32;
+    assert(cache.begin(frameBytes));
+    assert(lastBytes == frameBytes * ReaderPageCache::CAPACITY);
+    assert(cache.bytesUsed() == lastBytes);
+
+    uint8_t source[frameBytes];
+    uint8_t restored[frameBytes];
+    for (size_t page = 0; page < ReaderPageCache::CAPACITY; ++page) {
+      std::memset(source, static_cast<int>(page), sizeof(source));
+      assert(cache.store({.spineIndex = 3, .pageNumber = static_cast<int>(page)}, source));
+    }
+    assert(cache.size() == ReaderPageCache::CAPACITY);
+    assert(cache.restore({.spineIndex = 3, .pageNumber = 0}, restored));
+    for (const uint8_t byte : restored) assert(byte == 0);
+    assert(!cache.restore({.spineIndex = 4, .pageNumber = 0}, restored));
+    assert(cache.hitCount() == 1 && cache.missCount() == 1);
+
+    std::memset(source, 7, sizeof(source));
+    assert(cache.store({.spineIndex = 3, .pageNumber = 7}, source));
+    assert(cache.evictionCount() == 1);
+    assert(cache.contains({.spineIndex = 3, .pageNumber = 0}));
+    assert(!cache.contains({.spineIndex = 3, .pageNumber = 1}));
+
+    cache.clear();
+    assert(cache.size() == 0 && cache.bytesUsed() == frameBytes * ReaderPageCache::CAPACITY);
+  }
   assert(liveAllocations == 0);
 }

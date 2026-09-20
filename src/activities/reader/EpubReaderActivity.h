@@ -15,6 +15,7 @@
 #include "EpubReaderMenuActivity.h"
 #include "ProgressMapper.h"
 #include "ReaderActivity.h"
+#include "ReaderPageCache.h"
 #include "ReaderToolbarUi.h"
 #include "components/OptionPopup.h"
 
@@ -45,9 +46,8 @@ class EpubReaderActivity final : public ReaderActivity {
   bool showDictionaryMessage = false;
   unsigned long dictionaryMessageTime = 0UL;
   bool currentPageBookmarked = false;
-  int idlePrewarmSpine = -1;
-  int idlePrewarmPage = -1;
   unsigned long lastRenderCompleteMs = 0;
+  unsigned long lastPageCacheWorkMs = 0;
   bool bookmarkRemoved = false;
   std::vector<BookmarkEntry> cachedBookmarks;
   bool recentsEntryRemoved = false;
@@ -107,6 +107,20 @@ class EpubReaderActivity final : public ReaderActivity {
   uint16_t buildViewportWidth = 0;
   uint16_t buildViewportHeight = 0;
   bool partialRebuildStartFailed = false;
+
+  ReaderPageCache pageCache;
+  uint32_t pageCacheSettingsIdentity = 0;
+  int pageCacheSpineIndex = -1;
+  int pageCacheMarginTop = 0;
+  int pageCacheMarginRight = 0;
+  int pageCacheMarginBottom = 0;
+  int pageCacheMarginLeft = 0;
+
+  uint32_t pageCacheIdentity(const ReaderRenderSpec& spec) const;
+  ReaderPageCache::Key pageCacheKey(const ReaderRenderSpec& spec, int pageNumber, bool bookmarked) const;
+  void syncPageCache(const ReaderRenderSpec& spec);
+  void cacheCurrentFrame(const ReaderRenderSpec& spec);
+  void precacheNearbyPage();
 
   int lastSavedSpineIndex = -1;
   int lastSavedPage = -1;
@@ -172,7 +186,7 @@ class EpubReaderActivity final : public ReaderActivity {
   void restoreSavedPosition();
 
   void renderContents(std::unique_ptr<Page> page, int orientedMarginTop, int orientedMarginRight,
-                      int orientedMarginBottom, int orientedMarginLeft);
+                      int orientedMarginBottom, int orientedMarginLeft, bool refresh = true);
   void renderStatusBar() const;
   void applyOrientation(uint8_t orientation);
   void applyInitialOrientation() override;
