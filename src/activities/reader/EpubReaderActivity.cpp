@@ -404,6 +404,7 @@ void EpubReaderActivity::cacheCurrentFrame(const ReaderRenderSpec& spec) {
 
 void EpubReaderActivity::precacheNearbyPage() {
   constexpr unsigned long IDLE_CACHE_DEBOUNCE_MS = 400;
+  constexpr unsigned long SPINNER_FRAME_MS = 800;
   static constexpr int8_t NEARBY_OFFSETS[] = {1, -1, 2, -2, 3, 4};
   static_assert(std::size(NEARBY_OFFSETS) + 1 == ReaderPageCache::CAPACITY);
 
@@ -423,7 +424,18 @@ void EpubReaderActivity::precacheNearbyPage() {
   RenderLock lock;
   const ReaderRenderSpec spec = SETTINGS.readerRenderSpec(buildViewportWidth, buildViewportHeight);
   syncPageCache(spec);
-  if (section->preloadPageData()) return;
+  const auto animateSpinner = [this]() {
+    const unsigned long spinnerNow = millis();
+    if (pageCacheSpinnerVisible && spinnerNow - lastPageCacheSpinnerMs < SPINNER_FRAME_MS) return;
+    GUI.drawBusyIndicator(renderer, pageCacheSpinnerFrame++);
+    renderer.displayBuffer(HalDisplay::FAST_REFRESH);
+    pageCacheSpinnerVisible = true;
+    lastPageCacheSpinnerMs = millis();
+  };
+  if (section->preloadPageData()) {
+    if (pageCache.enabled()) animateSpinner();
+    return;
+  }
   if (!pageCache.enabled() || section->isBuilding()) return;
   const int originalPage = section->currentPage;
   const bool originalBookmarked = currentPageBookmarked;
@@ -444,7 +456,15 @@ void EpubReaderActivity::precacheNearbyPage() {
   }
   section->currentPage = originalPage;
   currentPageBookmarked = originalBookmarked;
-  if (targetPage < 0) return;
+  if (targetPage < 0) {
+    if (pageCacheSpinnerVisible) {
+      renderer.displayBuffer(HalDisplay::FAST_REFRESH);
+      pageCacheSpinnerVisible = false;
+    }
+    return;
+  }
+
+  animateSpinner();
 
   if (!section || section->isBuilding()) return;
   auto page = section->loadReaderPage(targetPage);
@@ -1271,6 +1291,7 @@ bool EpubReaderActivity::skipLoopDelay() {
 void EpubReaderActivity::renderBook() {
   currentPageLinks.clear();
   if (!epub) return;
+  pageCacheSpinnerVisible = false;
   // Runs under the render task's RenderLock; catches every requestUpdate()
   // exit from the overlay while its deferred chrome refresh is still pending.
   settleOverlayRefresh();

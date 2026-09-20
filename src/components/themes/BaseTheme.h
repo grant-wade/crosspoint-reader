@@ -222,6 +222,7 @@ class BaseTheme {
 
   // Component drawing methods
   static void drawProgressBar(const GfxRenderer& renderer, Rect rect, size_t current, size_t total);
+  static void drawBusyIndicator(const GfxRenderer& renderer, uint8_t frame);
   void drawBatteryLeft(const GfxRenderer& renderer, Rect rect,
                        bool showPercentage = true) const;  // Left aligned (reader mode)
   virtual void fillBatteryIcon(const GfxRenderer& renderer, Rect rect, uint16_t percentage) const;

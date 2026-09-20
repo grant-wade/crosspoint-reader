@@ -135,6 +135,26 @@ void BaseTheme::drawProgressBar(const GfxRenderer& renderer, Rect rect, const si
   renderer.drawCenteredText(UI_10_FONT_ID, rect.y + rect.height + 15, percentText.c_str());
 }
 
+void BaseTheme::drawBusyIndicator(const GfxRenderer& renderer, const uint8_t frame) {
+  constexpr int SIZE = 20;
+  constexpr int RADIUS = 7;
+  constexpr int STROKE = 2;
+  constexpr int MARGIN = 4;
+  static constexpr int8_t DIRECTIONS[][2] = {{-1, -1}, {1, -1}, {1, 1}, {-1, 1}};
+  int top, right, bottom, left;
+  renderer.getOrientedViewableTRBL(&top, &right, &bottom, &left);
+  const int x = renderer.getScreenWidth() - right - MARGIN - SIZE;
+  const int y = top + MARGIN;
+  const int centerX = x + SIZE / 2;
+  const int centerY = y + SIZE / 2;
+
+  renderer.fillRect(x, y, SIZE, SIZE, false);
+  for (uint8_t i = 0; i < std::size(DIRECTIONS); i++) {
+    if (i == frame % std::size(DIRECTIONS)) continue;
+    renderer.drawArc(RADIUS, centerX, centerY, DIRECTIONS[i][0], DIRECTIONS[i][1], STROKE, true);
+  }
+}
+
 // Centre a button-hint label inside its box. A label that fits is drawn on the
 // single baseline it always was; one too wide used to overflow the button border
 // and run into the neighbouring hint, and now wraps to at most two centred lines

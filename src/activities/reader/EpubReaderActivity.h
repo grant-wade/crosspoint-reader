@@ -48,6 +48,9 @@ class EpubReaderActivity final : public ReaderActivity {
   bool currentPageBookmarked = false;
   unsigned long lastRenderCompleteMs = 0;
   unsigned long lastPageCacheWorkMs = 0;
+  unsigned long lastPageCacheSpinnerMs = 0;
+  uint8_t pageCacheSpinnerFrame = 0;
+  bool pageCacheSpinnerVisible = false;
   bool bookmarkRemoved = false;
   std::vector<BookmarkEntry> cachedBookmarks;
   bool recentsEntryRemoved = false;
