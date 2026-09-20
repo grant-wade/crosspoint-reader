@@ -1,5 +1,6 @@
 #pragma once
 #include <HalStorage.h>
+#include <SerializationInput.h>
 
 #include <algorithm>
 #include <cstring>
@@ -42,7 +43,7 @@ class PageLine final : public PageElement {
   void render(GfxRenderer& renderer, int fontId, int xOffset, int yOffset) override;
   bool serialize(HalFile& file) override;
   PageElementTag getTag() const override { return TAG_PageLine; }
-  static std::unique_ptr<PageLine> deserialize(HalFile& file);
+  static std::unique_ptr<PageLine> deserialize(serialization::Input& file);
 };
 
 // New PageImage class
@@ -56,7 +57,7 @@ class PageImage final : public PageElement {
   void renderPlaceholder(GfxRenderer& renderer, int xOffset, int yOffset) const;
   bool serialize(HalFile& file) override;
   PageElementTag getTag() const override { return TAG_PageImage; }
-  static std::unique_ptr<PageImage> deserialize(HalFile& file);
+  static std::unique_ptr<PageImage> deserialize(serialization::Input& file);
   const ImageBlock& getImageBlock() const { return *imageBlock; }
 };
 
@@ -71,7 +72,7 @@ class PageHorizontalRule final : public PageElement {
   void render(GfxRenderer& renderer, int fontId, int xOffset, int yOffset) override;
   bool serialize(HalFile& file) override;
   PageElementTag getTag() const override { return TAG_PageHorizontalRule; }
-  static std::unique_ptr<PageHorizontalRule> deserialize(HalFile& file);
+  static std::unique_ptr<PageHorizontalRule> deserialize(serialization::Input& file);
 };
 
 class Page {
@@ -122,6 +123,7 @@ class Page {
   void renderWithImagePlaceholders(GfxRenderer& renderer, int fontId, int xOffset, int yOffset) const;
   bool serialize(HalFile& file) const;
   static std::unique_ptr<Page> deserialize(HalFile& file);
+  static std::unique_ptr<Page> deserialize(serialization::Input& file);
 
   // Check if page contains any images (used to force full refresh)
   bool hasImages() const {

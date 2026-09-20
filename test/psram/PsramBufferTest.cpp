@@ -7,6 +7,7 @@
 #include <string>
 #include <utility>
 
+#include "Epub/Epub/PageDataCache.h"
 #include "activities/reader/ReaderPageCache.h"
 
 struct Pod {
@@ -146,6 +147,54 @@ int main() {
 
     cache.clear();
     assert(cache.size() == 0 && cache.bytesUsed() == frameBytes * ReaderPageCache::CAPACITY);
+  }
+  assert(liveAllocations == 0);
+
+  {
+    PageDataCache cache;
+    failAllocation = true;
+    assert(!cache.begin());
+    const size_t attempts = allocationCalls;
+    failAllocation = false;
+    assert(!cache.begin() && allocationCalls == attempts);
+    assert(cache.nextPage(0, 100) == -1 && cache.find(0) == nullptr && cache.bytesUsed() == 0);
+  }
+  for (int session = 0; session < 10; ++session) {
+    PageDataCache cache;
+    assert(cache.begin());
+    const size_t attempts = allocationCalls;
+    assert(cache.bytesUsed() >= PageDataCache::CAPACITY * PageDataCache::PAGE_BYTES);
+    for (int current = 0; current < 300; ++current) {
+      cache.setWindow(current, 300);
+      for (int candidate; (candidate = cache.nextPage(current, 300)) >= 0;) {
+        auto& entry = cache.prepare(candidate);
+        entry.length = 32;
+        entry.loaded = 16;
+        entry.visibleTextOffset = candidate * 100;
+        std::memset(entry.bytes, candidate % 256, entry.length);
+        assert(cache.find(candidate)->loaded != cache.find(candidate)->length);
+        entry.loaded = entry.length;
+      }
+      for (int page = std::max(0, current - PageDataCache::PREVIOUS);
+           page <= std::min(299, current + PageDataCache::NEXT); ++page) {
+        const auto* entry = cache.find(page);
+        assert(entry && entry->loaded == 32 && entry->visibleTextOffset == page * 100u);
+        for (size_t i = 0; i < entry->length; ++i) assert(entry->bytes[i] == page % 256);
+      }
+      if (current > 2) assert(!cache.find(current - 3));
+      cache.recordLoad(true);
+    }
+    assert(cache.hits() == 300 && cache.evictions() == 297);
+    cache.recordLoad(false);
+    assert(cache.misses() == 1);
+    cache.clear();
+    assert(cache.payloadBytes() == 0 && cache.find(299) == nullptr);
+    assert(cache.nextPage(50, 100) == 50);
+    auto& oversized = cache.prepare(50);  // A bypassed page isn't retried every idle tick.
+    assert(oversized.length == 0 && cache.nextPage(50, 100) == 51);
+    cache.discard(50);
+    assert(cache.nextPage(50, 100) == 50);
+    assert(allocationCalls == attempts && liveAllocations == 1);
   }
   assert(liveAllocations == 0);
 }

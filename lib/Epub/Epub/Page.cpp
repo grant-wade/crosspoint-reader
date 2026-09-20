@@ -31,7 +31,7 @@ bool PageLine::serialize(HalFile& file) {
   return block->serialize(file);
 }
 
-std::unique_ptr<PageLine> PageLine::deserialize(HalFile& file) {
+std::unique_ptr<PageLine> PageLine::deserialize(serialization::Input& file) {
   int16_t xPos;
   int16_t yPos;
   serialization::readPod(file, xPos);
@@ -68,7 +68,7 @@ bool PageImage::serialize(HalFile& file) {
   return imageBlock->serialize(file);
 }
 
-std::unique_ptr<PageImage> PageImage::deserialize(HalFile& file) {
+std::unique_ptr<PageImage> PageImage::deserialize(serialization::Input& file) {
   int16_t xPos;
   int16_t yPos;
   serialization::readPod(file, xPos);
@@ -104,7 +104,7 @@ bool PageHorizontalRule::serialize(HalFile& file) {
   return true;
 }
 
-std::unique_ptr<PageHorizontalRule> PageHorizontalRule::deserialize(HalFile& file) {
+std::unique_ptr<PageHorizontalRule> PageHorizontalRule::deserialize(serialization::Input& file) {
   int16_t xPos = 0;
   int16_t yPos = 0;
   uint16_t width = 0;
@@ -191,6 +191,14 @@ bool Page::serialize(HalFile& file) const {
 }
 
 std::unique_ptr<Page> Page::deserialize(HalFile& file) {
+  [[maybe_unused]] const unsigned long started = millis();
+  serialization::Input input(file);
+  auto page = deserialize(input);
+  LOG_DBG("PGE", "SD deserialization=%lums", millis() - started);
+  return page;
+}
+
+std::unique_ptr<Page> Page::deserialize(serialization::Input& file) {
   auto page = makeUniqueNoThrow<Page>();
   if (!page) {
     LOG_ERR("PGE", "Deserialization failed: could not allocate Page");
@@ -281,5 +289,9 @@ std::unique_ptr<Page> Page::deserialize(HalFile& file) {
     }
   }
 
+  if (!file.good()) {
+    LOG_ERR("PGE", "Deserialization failed: truncated page");
+    return nullptr;
+  }
   return page;
 }

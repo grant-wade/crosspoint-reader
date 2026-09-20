@@ -120,7 +120,78 @@ TEST_F(ChapterHtmlSlimParserTest, PageImageDeserializeRejectsMissingImageBlock) 
   }
   HalFile input;
   ASSERT_TRUE(input.open(path.c_str(), "rb"));
-  EXPECT_EQ(PageImage::deserialize(input), nullptr);
+  serialization::Input reader(input);
+  EXPECT_EQ(PageImage::deserialize(reader), nullptr);
+}
+
+TEST_F(ChapterHtmlSlimParserTest, PagePayloadDeserializesIdenticallyFromSdAndUnalignedMemory) {
+  Page original;
+  original.elements.reserve(2);
+  auto block = std::make_unique<TextBlock>(
+      std::vector<std::string>{"hello", "世界"}, std::vector<int16_t>{0, 45},
+      std::vector<EpdFontFamily::Style>{EpdFontFamily::BOLD, EpdFontFamily::REGULAR}, std::vector<uint8_t>{2, 0},
+      std::vector<uint16_t>{10, 0}, BlockStyle{}, std::vector<std::string>{"", "せかい"});
+  original.elements.push_back(std::make_unique<PageLine>(std::move(block), 12, 34));
+  original.elements.push_back(std::make_unique<PageHorizontalRule>(100, 2, 12, 60));
+  original.addFootnote("1", "notes.xhtml#note");
+  ASSERT_TRUE(original.addLink("next.xhtml#target", 12, 34, 100, 20));
+  const auto path = std::filesystem::temp_directory_path() / "crosspoint-page-payload.bin";
+  {
+    HalFile output;
+    ASSERT_TRUE(output.open(path.c_str(), "wb"));
+    ASSERT_TRUE(original.serialize(output));
+  }
+  std::vector<uint8_t> bytes;
+  {
+    HalFile input;
+    ASSERT_TRUE(input.open(path.c_str(), "rb"));
+    bytes.resize(input.size() + 1);
+    ASSERT_EQ(input.read(bytes.data() + 1, bytes.size() - 1), bytes.size() - 1);
+  }
+  std::unique_ptr<Page> sdPage;
+  {
+    HalFile input;
+    ASSERT_TRUE(input.open(path.c_str(), "rb"));
+    sdPage = Page::deserialize(input);
+  }
+  ASSERT_NE(sdPage, nullptr);
+  serialization::Input input(std::span<const uint8_t>(bytes.data() + 1, bytes.size() - 1));
+  auto memoryPage = Page::deserialize(input);
+  ASSERT_NE(memoryPage, nullptr);
+  ASSERT_TRUE(input.good());
+  EXPECT_EQ(input.remaining(), 0u);
+  ASSERT_EQ(memoryPage->elements.size(), sdPage->elements.size());
+  const auto* text = static_cast<PageLine&>(*memoryPage->elements[0]).getBlock();
+  EXPECT_STREQ(text->wordText(0), "hello");
+  EXPECT_STREQ(text->wordText(1), "世界");
+  EXPECT_EQ(text->getRubyTexts()[1], "せかい");
+  EXPECT_EQ(text->focusBoundary(0), 2);
+  EXPECT_EQ(text->wordXpos(1), 45);
+  for (const Page* page : {sdPage.get(), memoryPage.get()}) {
+    {
+      HalFile output;
+      ASSERT_TRUE(output.open(path.c_str(), "wb"));
+      ASSERT_TRUE(page->serialize(output));
+    }
+    HalFile serialized;
+    ASSERT_TRUE(serialized.open(path.c_str(), "rb"));
+    std::vector<uint8_t> roundTrip(serialized.size());
+    ASSERT_EQ(serialized.read(roundTrip.data(), roundTrip.size()), roundTrip.size());
+    ASSERT_EQ(roundTrip.size(), bytes.size() - 1);
+    EXPECT_TRUE(std::equal(roundTrip.begin(), roundTrip.end(), bytes.begin() + 1));
+  }
+  for (size_t length = 0; length < bytes.size() - 1; ++length) {
+    serialization::Input truncated(std::span<const uint8_t>(bytes.data() + 1, length));
+    EXPECT_EQ(Page::deserialize(truncated), nullptr) << "length=" << length;
+  }
+  // Untrusted string lengths are checked before resize/heap allocation.
+  const uint8_t oversizedString[] = {0xff, 0xff, 0xff, 0xff};
+  serialization::Input corrupt{std::span<const uint8_t>(oversizedString)};
+  std::string value;
+  serialization::readString(corrupt, value);
+  EXPECT_FALSE(corrupt.good());
+  EXPECT_TRUE(value.empty());
+  std::filesystem::remove(path);
 }
 
 TEST_P(ChapterHtmlSlimParserTest, KeepsCssVerticalAlignAndInternalLinkMetadata) {

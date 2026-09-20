@@ -2,10 +2,12 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
 #include "Epub.h"
+#include "PageDataCache.h"
 #include "ReaderRenderSpec.h"
 
 class Page;
@@ -19,6 +21,11 @@ class Section {
   GfxRenderer& renderer;
   std::string filePath;
   HalFile file;
+  PageDataCache pageDataCache;
+  HalFile pageDataFile;
+  int preloadingPage = -1;
+  uint32_t preloadingOffset = 0;
+  void cancelPagePreload();
 
   void writeSectionFileHeader(const ReaderRenderSpec& spec);
   uint32_t onPageComplete(std::unique_ptr<Page> page);
@@ -86,7 +93,7 @@ class Section {
   explicit Section(const std::shared_ptr<Epub>& epub, int spineIndex, GfxRenderer& renderer);
   ~Section();
   bool loadSectionFile(const ReaderRenderSpec& spec);
-  bool clearCache() const;
+  bool clearCache();
   bool createSectionFile(const ReaderRenderSpec& spec, const std::function<void()>& popupFn = nullptr);
 
   // Incremental build: lay out the section a few pages at a time so a large chapter
@@ -117,6 +124,12 @@ class Section {
   // Unified page read: from the active build if it has reached the page, otherwise from
   // the on-disk file (finalized section, or a partial the rebuild hasn't caught up to).
   std::unique_ptr<Page> loadPage(int page);
+  // Reader-only fast path. Dictionary and other callers retain loadPage().
+  std::unique_ptr<Page> loadReaderPage(int page, bool* psramHit = nullptr);
+  static std::unique_ptr<Page> loadPageFromMemory(std::span<const uint8_t> bytes, uint32_t visibleTextOffset);
+  // One bounded SD read per idle tick, never called from a requested page turn.
+  bool preloadPageData();
+  void invalidatePageData();
 
   std::string getTextFromSectionFile();
 

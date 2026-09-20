@@ -429,7 +429,7 @@ bool ImageBlock::serialize(HalFile& file) {
   return true;
 }
 
-std::unique_ptr<ImageBlock> ImageBlock::deserialize(HalFile& file) {
+std::unique_ptr<ImageBlock> ImageBlock::deserialize(serialization::Input& file) {
   std::string path;
   std::string src;
   serialization::readString(file, path);
@@ -437,5 +437,9 @@ std::unique_ptr<ImageBlock> ImageBlock::deserialize(HalFile& file) {
   int16_t w, h;
   serialization::readPod(file, w);
   serialization::readPod(file, h);
+  if (!file.good()) {
+    LOG_ERR("IMG", "Deserialization failed: truncated image");
+    return nullptr;
+  }
   return std::unique_ptr<ImageBlock>(new (std::nothrow) ImageBlock(path, src, w, h));
 }

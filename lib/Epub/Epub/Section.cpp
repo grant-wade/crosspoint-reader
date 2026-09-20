@@ -86,9 +86,20 @@ Section::Section(const std::shared_ptr<Epub>& epub, const int spineIndex, GfxRen
 // Suspend any in-progress build so every section.reset() / navigation / sleep path
 // persists the pages already laid out as a partial .bin instead of discarding them
 // (no-op once a build has completed or never started).
-Section::~Section() { suspendBuild(); }
+Section::~Section() {
+  if (pageDataCache.enabled()) {
+    LOG_DBG("SCT", "Page data summary: hits=%lu SD-avoided=%lu misses=%lu evictions=%lu PSRAM=%zu",
+            static_cast<unsigned long>(pageDataCache.hits()), static_cast<unsigned long>(pageDataCache.hits()),
+            static_cast<unsigned long>(pageDataCache.misses()), static_cast<unsigned long>(pageDataCache.evictions()),
+            pageDataCache.bytesUsed());
+  }
+  cancelPagePreload();
+  suspendBuild();
+}
 
 uint32_t Section::onPageComplete(std::unique_ptr<Page> page) {
+  if (preloadingPage == builtPageCount_) cancelPagePreload();
+  pageDataCache.discard(builtPageCount_);
   if (!file) {
     LOG_ERR("SCT", "File not open for writing page %d", builtPageCount_);
     return 0;
@@ -144,6 +155,7 @@ void Section::writeSectionFileHeader(const ReaderRenderSpec& spec) {
 }
 
 bool Section::loadSectionFile(const ReaderRenderSpec& spec) {
+  invalidatePageData();
   if (!Storage.openFileForRead("SCT", filePath, file)) {
     return false;
   }
@@ -229,7 +241,8 @@ bool Section::loadSectionFile(const ReaderRenderSpec& spec) {
 }
 
 // Your updated class method (assuming you are using the 'SD' object, which is a wrapper for a specific filesystem)
-bool Section::clearCache() const {
+bool Section::clearCache() {
+  invalidatePageData();
   const std::string tmpBin = binTmpPath();
   if (Storage.exists(tmpBin.c_str())) {
     Storage.remove(tmpBin.c_str());
@@ -260,6 +273,7 @@ bool Section::createSectionFile(const ReaderRenderSpec& spec, const std::functio
 }
 
 bool Section::startBuild(const ReaderRenderSpec& spec, const std::function<void()>& popupFn) {
+  invalidatePageData();
   if (build_) {
     LOG_ERR("SCT", "startBuild called while a build is already active");
     return false;
@@ -549,6 +563,7 @@ uint16_t Section::estimatedTotalPages() const {
 // the total page count. The parser must still be alive (anchors are read from it).
 // On failure the tmp is removed and any pre-existing file at filePath is left intact.
 bool Section::commitBuildFile(const uint8_t version, const uint32_t bytesConsumed, const uint32_t totalBytes) {
+  invalidatePageData();
   const bool asPartial = (version == SECTION_FILE_PARTIAL_VERSION);
 
   const auto failCommit = [this]() {
@@ -665,6 +680,7 @@ bool Section::finalizeBuild() {
 
 void Section::suspendBuild() {
   if (!build_) return;
+  invalidatePageData();
 
   // Only worth persisting if this build produced pages a pre-existing partial doesn't
   // already cover; otherwise keep the older (bigger) partial and just drop the tmp.
@@ -703,6 +719,7 @@ void Section::suspendBuild() {
 }
 
 void Section::abandonBuild() {
+  invalidatePageData();
   if (!build_) return;
   if (build_->parser) build_->parser->abortParse();
   if (build_->cssParser) build_->cssParser->clear();
@@ -799,6 +816,144 @@ std::unique_ptr<Page> Section::loadPage(const int page) {
     return nullptr;
   }
   return loadPageAt(page);
+}
+
+void Section::cancelPagePreload() {
+  // Member handle: release before replacing a section file or abandoning a fill.
+  pageDataFile = HalFile{};
+  preloadingPage = -1;
+}
+
+void Section::invalidatePageData() {
+  cancelPagePreload();
+  pageDataCache.clear();
+}
+
+std::unique_ptr<Page> Section::loadPageFromMemory(std::span<const uint8_t> bytes, uint32_t visibleTextOffset) {
+  serialization::Input input(bytes);
+  auto page = Page::deserialize(input);
+  if (!page || !input.good() || input.remaining() != 0) {
+    LOG_ERR("SCT", "Invalid memory page payload");
+    return nullptr;
+  }
+  page->visibleTextOffset = visibleTextOffset;
+  return page;
+}
+
+std::unique_ptr<Page> Section::loadReaderPage(const int page, bool* psramHit) {
+  const unsigned long started = millis();
+  if (psramHit) *psramHit = false;
+  if (preloadingPage >= 0) {
+    pageDataCache.discard(preloadingPage);
+    cancelPagePreload();
+  }
+  pageDataCache.setWindow(currentPage, pageCount);
+  auto* entry = pageDataCache.find(page);
+  if (entry && entry->length && entry->loaded == entry->length) {
+    auto result = loadPageFromMemory({entry->bytes, entry->length}, entry->visibleTextOffset);
+    if (result) {
+      pageDataCache.recordLoad(true);
+      if (psramHit) *psramHit = true;
+      LOG_DBG("SCT",
+              "Page data PSRAM: page=%d deserialize=%lums hits=%lu SD-avoided=%lu misses=%lu evictions=%lu PSRAM=%zu",
+              page, millis() - started, static_cast<unsigned long>(pageDataCache.hits()),
+              static_cast<unsigned long>(pageDataCache.hits()), static_cast<unsigned long>(pageDataCache.misses()),
+              static_cast<unsigned long>(pageDataCache.evictions()), pageDataCache.bytesUsed());
+      return result;
+    }
+    entry->length = 0;
+  }
+  pageDataCache.recordLoad(false);
+  auto result = loadPage(page);
+  LOG_DBG("SCT", "Page data SD: page=%d load+deserialize=%lums", page, millis() - started);
+  return result;
+}
+
+bool Section::preloadPageData() {
+#if !defined(FREEINK_DEVICE_X4PRO)
+  return false;
+#else
+  if (!pageDataCache.begin()) return false;
+  pageDataCache.setWindow(currentPage, pageCount);
+  if (preloadingPage >= 0 && !pageDataCache.find(preloadingPage)) cancelPagePreload();
+
+  if (preloadingPage < 0) {
+    const int page = pageDataCache.nextPage(currentPage, pageCount);
+    if (page < 0) return false;
+    auto& entry = pageDataCache.prepare(page);
+    uint32_t end = 0;
+    if (build_ && page < static_cast<int>(build_->lut.size())) {
+      preloadingOffset = build_->lut[page].fileOffset;
+      end = page + 1 < static_cast<int>(build_->lut.size()) ? build_->lut[page + 1].fileOffset : file.position();
+      entry.visibleTextOffset = build_->lut[page].visibleTextOffset;
+      file.flush();
+      if (!Storage.openFileForRead("SCT", binTmpPath(), pageDataFile)) {
+        cancelPagePreload();
+        return true;
+      }
+    } else {
+      const int onDisk = partial_ ? partialPageCount_ : (build_ ? 0 : pageCount);
+      if (page >= onDisk || !Storage.openFileForRead("SCT", filePath, pageDataFile)) {
+        cancelPagePreload();
+        return true;
+      }
+      const auto readOffset = [this](size_t position, uint32_t& value) {
+        return position <= pageDataFile.size() && pageDataFile.size() - position >= sizeof(value) &&
+               pageDataFile.seek(position) && pageDataFile.read(&value, sizeof(value)) == sizeof(value);
+      };
+      uint32_t lutOffset = 0;
+      uint32_t visibleLutOffset = 0;
+      if (!readOffset(HEADER_SIZE - 5 * sizeof(uint32_t), lutOffset) || lutOffset < HEADER_SIZE ||
+          lutOffset > pageDataFile.size() ||
+          static_cast<size_t>(onDisk) > (pageDataFile.size() - lutOffset) / sizeof(uint32_t) ||
+          !readOffset(lutOffset + page * sizeof(uint32_t), preloadingOffset) ||
+          !readOffset(HEADER_SIZE - sizeof(uint32_t), visibleLutOffset) || visibleLutOffset < HEADER_SIZE ||
+          visibleLutOffset > pageDataFile.size() ||
+          static_cast<size_t>(onDisk) > (pageDataFile.size() - visibleLutOffset) / sizeof(uint32_t) ||
+          !readOffset(visibleLutOffset + page * sizeof(uint32_t), entry.visibleTextOffset)) {
+        LOG_ERR("SCT", "Invalid page data LUT: page=%d", page);
+        cancelPagePreload();
+        return true;
+      }
+      end = lutOffset;
+      if ((page + 1 < onDisk && !readOffset(lutOffset + (page + 1) * sizeof(uint32_t), end)) || end > lutOffset) {
+        LOG_ERR("SCT", "Invalid page data end: page=%d", page);
+        cancelPagePreload();
+        return true;
+      }
+    }
+    if (preloadingOffset < HEADER_SIZE || end <= preloadingOffset ||
+        end - preloadingOffset > PageDataCache::PAGE_BYTES) {
+      LOG_DBG("SCT", "Page data bypass: page=%d start=%lu end=%lu", page, static_cast<unsigned long>(preloadingOffset),
+              static_cast<unsigned long>(end));
+      cancelPagePreload();
+      return true;
+    }
+    entry.length = end - preloadingOffset;
+    preloadingPage = page;
+    return true;  // Yield after opening/reading metadata, before reading payload bytes.
+  }
+
+  auto& entry = *pageDataCache.find(preloadingPage);
+  constexpr uint32_t CHUNK_BYTES = 1024;
+  const size_t count = std::min(CHUNK_BYTES, entry.length - entry.loaded);
+  const bool ok = pageDataFile.seek(preloadingOffset + entry.loaded) &&
+                  pageDataFile.read(entry.bytes + entry.loaded, count) == static_cast<int>(count);
+  if (!ok) {
+    LOG_ERR("SCT", "Page data preload read failed: page=%d", preloadingPage);
+    entry.length = 0;
+    cancelPagePreload();
+    return true;
+  }
+  entry.loaded += count;
+  if (entry.loaded == entry.length) {
+    LOG_DBG("SCT", "Idle page data: page=%d bytes=%lu payload=%zu PSRAM=%zu evictions=%lu", preloadingPage,
+            static_cast<unsigned long>(entry.length), pageDataCache.payloadBytes(), pageDataCache.bytesUsed(),
+            static_cast<unsigned long>(pageDataCache.evictions()));
+    cancelPagePreload();
+  }
+  return true;
+#endif
 }
 
 std::string Section::getTextFromSectionFile() {

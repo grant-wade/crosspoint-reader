@@ -342,6 +342,7 @@ uint32_t EpubReaderActivity::pageCacheIdentity(const ReaderRenderSpec& spec) con
   mix(spec.imageRendering);
   mix(spec.focusReadingEnabled);
   mix(SETTINGS.screenMargin);
+  mix(SETTINGS.orientation);
   mix(SETTINGS.textAntiAliasing);
   mix(SETTINGS.screenInverted);
   mix(SETTINGS.uiTheme);
@@ -375,7 +376,6 @@ ReaderPageCache::Key EpubReaderActivity::pageCacheKey(const ReaderRenderSpec& sp
 }
 
 void EpubReaderActivity::syncPageCache(const ReaderRenderSpec& spec) {
-  if (!pageCache.enabled()) return;
   const uint32_t identity = pageCacheIdentity(spec);
   if (pageCacheSettingsIdentity == identity && pageCacheSpineIndex == currentSpineIndex) return;
   if (pageCache.size() > 0) {
@@ -383,6 +383,7 @@ void EpubReaderActivity::syncPageCache(const ReaderRenderSpec& spec) {
             pageCacheSettingsIdentity != identity);
   }
   pageCache.clear();
+  if (section) section->invalidatePageData();
   pageCacheSettingsIdentity = identity;
   pageCacheSpineIndex = currentSpineIndex;
 }
@@ -407,15 +408,23 @@ void EpubReaderActivity::precacheNearbyPage() {
   static_assert(std::size(NEARBY_OFFSETS) + 1 == ReaderPageCache::CAPACITY);
 
   const unsigned long now = millis();
-  if (!pageCache.enabled() || !section || section->isBuilding() || RenderLock::peek() || !renderer.hasFrameBuffer() ||
-      overlay != Overlay::None || overlayPageStored || showBookmarkMessage || showDictionaryMessage ||
-      pendingScreenshot || lastRenderCompleteMs == 0 || now - lastRenderCompleteMs <= IDLE_CACHE_DEBOUNCE_MS ||
-      now - lastPageCacheWorkMs <= IDLE_CACHE_DEBOUNCE_MS) {
+  if (!section || RenderLock::peek() || !renderer.hasFrameBuffer() || pendingManualTurn != 0 ||
+      mappedInput.wasAnyPressed() || mappedInput.wasAnyReleased() || overlay != Overlay::None || overlayPageStored ||
+      showBookmarkMessage || showDictionaryMessage || pendingScreenshot || lastRenderCompleteMs == 0 ||
+      now - lastRenderCompleteMs <= IDLE_CACHE_DEBOUNCE_MS || now - lastPageCacheWorkMs <= IDLE_CACHE_DEBOUNCE_MS) {
     return;
   }
 
+  int touchX, touchY;
+  if (mappedInput.isScreenTouchHeld(touchX, touchY) || mappedInput.isPressed(MappedInputManager::Button::PageBack) ||
+      mappedInput.isPressed(MappedInputManager::Button::PageForward))
+    return;
+
+  RenderLock lock;
   const ReaderRenderSpec spec = SETTINGS.readerRenderSpec(buildViewportWidth, buildViewportHeight);
   syncPageCache(spec);
+  if (section->preloadPageData()) return;
+  if (!pageCache.enabled() || section->isBuilding()) return;
   const int originalPage = section->currentPage;
   const bool originalBookmarked = currentPageBookmarked;
   const auto originalKey = pageCacheKey(spec, originalPage, originalBookmarked);
@@ -437,9 +446,8 @@ void EpubReaderActivity::precacheNearbyPage() {
   currentPageBookmarked = originalBookmarked;
   if (targetPage < 0) return;
 
-  RenderLock lock;
   if (!section || section->isBuilding()) return;
-  auto page = section->loadPage(targetPage);
+  auto page = section->loadReaderPage(targetPage);
   if (!page) return;
 
   section->currentPage = targetPage;
@@ -1317,6 +1325,7 @@ void EpubReaderActivity::renderBook() {
   pageCacheMarginLeft = orientedMarginLeft;
 
   if (!section) {
+    pageCache.clear();
     const auto filepath = epub->getSpineItem(currentSpineIndex).href;
     LOG_DBG("ERS", "Loading file: %s, index: %d", filepath.c_str(), currentSpineIndex);
     section = std::unique_ptr<Section>(new Section(epub, currentSpineIndex, renderer));
@@ -1518,7 +1527,8 @@ void EpubReaderActivity::renderBook() {
   const unsigned long pagePrepareStart = millis();
 
   {
-    auto p = section->loadPage(section->currentPage);
+    bool pageDataHit = false;
+    auto p = section->loadReaderPage(section->currentPage, &pageDataHit);
     if (!p) {
       LOG_ERR("ERS", "Failed to load page from SD - clearing section cache");
       automaticPageTurnActive = false;
@@ -1566,15 +1576,21 @@ void EpubReaderActivity::renderBook() {
       if (forcedRefreshPending) pagesUntilFullRefresh = 1;
       forcedRefreshPending = false;
       ReaderUtils::displayWithRefreshCycle(renderer, pagesUntilFullRefresh);
-      LOG_DBG("ERS", "Page turn prepared from cache in %lums, refresh=%lums", prepared - pagePrepareStart,
-              millis() - prepared);
+      LOG_DBG("ERS", "Page turn framebuffer-hit: data=%s prepare=%lums refresh=%lums", pageDataHit ? "PSRAM" : "SD",
+              prepared - pagePrepareStart, millis() - prepared);
     } else {
       renderContents(std::move(p), orientedMarginTop, orientedMarginRight, orientedMarginBottom, orientedMarginLeft);
       cacheCurrentFrame(renderSpec);
-      LOG_DBG("ERS", "Page turn prepared by render in %lums", millis() - pagePrepareStart);
+      LOG_DBG("ERS", "Page turn %s: load+render+refresh=%lums", pageDataHit ? "PSRAM-data-hit" : "SD-data-load",
+              millis() - pagePrepareStart);
     }
     lastRenderCompleteMs = millis();
     lastPageCacheWorkMs = lastRenderCompleteMs;
+  }
+
+  if (BoardConfig::isX4Pro()) {
+    const auto heap = HalMemory::getInternalHeap();
+    LOG_DBG("ERS", "After page turn: internal-free=%zu internal-largest=%zu", heap.freeBytes, heap.largestBlockBytes);
   }
 
   if (currentSpineIndex != lastSavedSpineIndex || section->currentPage != lastSavedPage ||
