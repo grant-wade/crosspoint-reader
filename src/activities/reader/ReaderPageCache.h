@@ -36,15 +36,11 @@ class ReaderPageCache {
     entryCount = 0;
   }
 
-  bool restore(const Key& key, uint8_t* destination, const bool recordStats = true) {
+  bool restore(const Key& key, uint8_t* destination) {
     Entry* entry = find(key);
-    if (!entry) {
-      if (recordStats) misses++;
-      return false;
-    }
+    if (!entry) return false;
     std::memcpy(destination, slotData(*entry), frameSize);
     entry->lastUsed = ++clock;
-    if (recordStats) hits++;
     return true;
   }
 
@@ -73,24 +69,18 @@ class ReaderPageCache {
       for (auto& entry : entries) {
         if (entry.lastUsed < target->lastUsed) target = &entry;
       }
-      evictions++;
     }
 
     target->key = key;
     target->valid = true;
     target->lastUsed = ++clock;
     std::memcpy(slotData(*target), source, frameSize);
-    pagesCached++;
     return true;
   }
 
   bool enabled() const { return data != nullptr; }
   size_t size() const { return entryCount; }
   size_t bytesUsed() const { return enabled() ? frameSize * CAPACITY : 0; }
-  uint32_t hitCount() const { return hits; }
-  uint32_t missCount() const { return misses; }
-  uint32_t evictionCount() const { return evictions; }
-  uint32_t pagesCachedCount() const { return pagesCached; }
 
  private:
   struct Entry {
@@ -115,8 +105,4 @@ class ReaderPageCache {
   size_t frameSize = 0;
   size_t entryCount = 0;
   uint32_t clock = 0;
-  uint32_t hits = 0;
-  uint32_t misses = 0;
-  uint32_t evictions = 0;
-  uint32_t pagesCached = 0;
 };

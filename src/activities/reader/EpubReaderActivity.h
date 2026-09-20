@@ -112,6 +112,9 @@ class EpubReaderActivity final : public ReaderActivity {
   bool partialRebuildStartFailed = false;
 
   ReaderPageCache pageCache;
+  std::atomic<bool> pageCacheWorkRequested{false};
+  std::atomic<bool> pageCacheWorkActive{false};
+  std::atomic<bool> pageCacheWorkCancelled{false};
   uint32_t pageCacheSettingsIdentity = 0;
   int pageCacheSpineIndex = -1;
   int pageCacheMarginTop = 0;
@@ -123,6 +126,7 @@ class EpubReaderActivity final : public ReaderActivity {
   ReaderPageCache::Key pageCacheKey(const ReaderRenderSpec& spec, int pageNumber, bool bookmarked) const;
   void syncPageCache(const ReaderRenderSpec& spec);
   void cacheCurrentFrame(const ReaderRenderSpec& spec);
+  void schedulePageCacheWork();
   void precacheNearbyPage();
 
   int lastSavedSpineIndex = -1;
@@ -189,7 +193,8 @@ class EpubReaderActivity final : public ReaderActivity {
   void restoreSavedPosition();
 
   void renderContents(std::unique_ptr<Page> page, int orientedMarginTop, int orientedMarginRight,
-                      int orientedMarginBottom, int orientedMarginLeft, bool refresh = true);
+                      int orientedMarginBottom, int orientedMarginLeft, bool refresh = true,
+                      const std::atomic<bool>* cancelled = nullptr);
   void renderStatusBar() const;
   void applyOrientation(uint8_t orientation);
   void applyInitialOrientation() override;
@@ -204,6 +209,7 @@ class EpubReaderActivity final : public ReaderActivity {
   std::string getBookAuthor() const override { return epub ? epub->getAuthor() : ""; }
   std::string getBookThumbBmpPath() const override { return epub ? epub->getThumbBmpPath() : ""; }
   void renderBook() override;
+  void runBackgroundWork(RenderLock&&) override;
   void onEndOfBookRendered() override;
 
  public:

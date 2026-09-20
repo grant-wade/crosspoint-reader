@@ -152,12 +152,6 @@ void moveFinishedBookToReadFolder(const std::string& srcPath, const std::string&
 }  // namespace
 
 EpubReaderActivity::~EpubReaderActivity() {
-  if (pageCache.enabled()) {
-    LOG_DBG("ERS", "Page cache summary: hits=%lu misses=%lu evictions=%lu cached=%lu PSRAM=%zu bytes",
-            static_cast<unsigned long>(pageCache.hitCount()), static_cast<unsigned long>(pageCache.missCount()),
-            static_cast<unsigned long>(pageCache.evictionCount()),
-            static_cast<unsigned long>(pageCache.pagesCachedCount()), pageCache.bytesUsed());
-  }
   ImageBlock::setExtractor(nullptr, nullptr);
   if (overlayRefreshPending) {
     RenderLock lock;  // whatever screen follows paints the framebuffer
@@ -208,10 +202,7 @@ bool EpubReaderActivity::loadBook() {
   epub = std::move(loadedEpub);
 
   if (BoardConfig::isX4Pro() && HalMemory::hasPsram()) {
-    if (pageCache.begin(renderer.getBufferSize())) {
-      LOG_DBG("ERS", "Page cache enabled: %zu pages, %zu PSRAM bytes", ReaderPageCache::CAPACITY,
-              pageCache.bytesUsed());
-    } else {
+    if (!pageCache.begin(renderer.getBufferSize())) {
       LOG_ERR("ERS", "Page cache disabled: PSRAM allocation failed");
     }
   }
@@ -378,10 +369,6 @@ ReaderPageCache::Key EpubReaderActivity::pageCacheKey(const ReaderRenderSpec& sp
 void EpubReaderActivity::syncPageCache(const ReaderRenderSpec& spec) {
   const uint32_t identity = pageCacheIdentity(spec);
   if (pageCacheSettingsIdentity == identity && pageCacheSpineIndex == currentSpineIndex) return;
-  if (pageCache.size() > 0) {
-    LOG_DBG("ERS", "Page cache invalidated: spine %d->%d settings=%d", pageCacheSpineIndex, currentSpineIndex,
-            pageCacheSettingsIdentity != identity);
-  }
   pageCache.clear();
   if (section) section->invalidatePageData();
   pageCacheSettingsIdentity = identity;
@@ -390,24 +377,11 @@ void EpubReaderActivity::syncPageCache(const ReaderRenderSpec& spec) {
 
 void EpubReaderActivity::cacheCurrentFrame(const ReaderRenderSpec& spec) {
   if (!pageCache.enabled() || !section || !display.getFrameBuffer()) return;
-  const uint32_t evictionsBefore = pageCache.evictionCount();
-  if (!pageCache.store(pageCacheKey(spec, section->currentPage, currentPageBookmarked), display.getFrameBuffer())) {
-    return;
-  }
-  if (pageCache.evictionCount() != evictionsBefore) {
-    LOG_DBG("ERS", "Page cache eviction: total=%lu", static_cast<unsigned long>(pageCache.evictionCount()));
-  }
-  LOG_DBG("ERS", "Page cached: spine=%d page=%d resident=%zu cached=%lu PSRAM=%zu", currentSpineIndex,
-          section->currentPage, pageCache.size(), static_cast<unsigned long>(pageCache.pagesCachedCount()),
-          pageCache.bytesUsed());
+  pageCache.store(pageCacheKey(spec, section->currentPage, currentPageBookmarked), display.getFrameBuffer());
 }
 
-void EpubReaderActivity::precacheNearbyPage() {
+void EpubReaderActivity::schedulePageCacheWork() {
   constexpr unsigned long IDLE_CACHE_DEBOUNCE_MS = 400;
-  constexpr unsigned long SPINNER_FRAME_MS = 800;
-  static constexpr int8_t NEARBY_OFFSETS[] = {1, -1, 2, -2, 3, 4};
-  static_assert(std::size(NEARBY_OFFSETS) + 1 == ReaderPageCache::CAPACITY);
-
   const unsigned long now = millis();
   if (!section || RenderLock::peek() || !renderer.hasFrameBuffer() || pendingManualTurn != 0 ||
       mappedInput.wasAnyPressed() || mappedInput.wasAnyReleased() || overlay != Overlay::None || overlayPageStored ||
@@ -421,7 +395,30 @@ void EpubReaderActivity::precacheNearbyPage() {
       mappedInput.isPressed(MappedInputManager::Button::PageForward))
     return;
 
-  RenderLock lock;
+  if (pageCacheWorkRequested || pageCacheWorkActive) return;
+  pageCacheWorkCancelled = false;
+  pageCacheWorkRequested = true;
+  requestBackgroundWork();
+}
+
+void EpubReaderActivity::runBackgroundWork(RenderLock&&) {
+  if (!pageCacheWorkRequested) return;
+  pageCacheWorkActive = true;
+  pageCacheWorkRequested = false;
+  precacheNearbyPage();
+  pageCacheWorkActive = false;
+}
+
+void EpubReaderActivity::precacheNearbyPage() {
+  constexpr unsigned long SPINNER_FRAME_MS = 800;
+  static constexpr int8_t NEARBY_OFFSETS[] = {1, -1, 2, -2, 3, 4};
+  static_assert(std::size(NEARBY_OFFSETS) + 1 == ReaderPageCache::CAPACITY);
+
+  if (pageCacheWorkCancelled || !section || !renderer.hasFrameBuffer() || overlay != Overlay::None ||
+      overlayPageStored || showBookmarkMessage || showDictionaryMessage || pendingScreenshot) {
+    return;
+  }
+
   const ReaderRenderSpec spec = SETTINGS.readerRenderSpec(buildViewportWidth, buildViewportHeight);
   syncPageCache(spec);
   const auto animateSpinner = [this]() {
@@ -433,15 +430,18 @@ void EpubReaderActivity::precacheNearbyPage() {
     lastPageCacheSpinnerMs = millis();
   };
   if (section->preloadPageData()) {
-    if (pageCache.enabled()) animateSpinner();
+    if (!pageCacheWorkCancelled && pageCache.enabled()) animateSpinner();
     return;
   }
-  if (!pageCache.enabled() || section->isBuilding()) return;
+  if (pageCacheWorkCancelled || !pageCache.enabled() || section->isBuilding()) return;
   const int originalPage = section->currentPage;
   const bool originalBookmarked = currentPageBookmarked;
   const auto originalKey = pageCacheKey(spec, originalPage, originalBookmarked);
   uint8_t* const frameBuffer = display.getFrameBuffer();
-  if (!frameBuffer || !pageCache.restore(originalKey, frameBuffer, false)) return;
+  if (!frameBuffer || !pageCache.restore(originalKey, frameBuffer)) {
+    if (pageCacheSpinnerVisible) requestUpdate();
+    return;
+  }
 
   int targetPage = -1;
   for (const int8_t offset : NEARBY_OFFSETS) {
@@ -466,19 +466,19 @@ void EpubReaderActivity::precacheNearbyPage() {
 
   animateSpinner();
 
-  if (!section || section->isBuilding()) return;
+  if (pageCacheWorkCancelled || !section || section->isBuilding()) return;
   auto page = section->loadReaderPage(targetPage);
   if (!page) return;
 
   section->currentPage = targetPage;
   updateBookmarkFlag();
   renderer.clearScreen();
-  const unsigned long start = millis();
   renderContents(std::move(page), pageCacheMarginTop, pageCacheMarginRight, pageCacheMarginBottom, pageCacheMarginLeft,
-                 false);
-  const uint32_t evictionsBefore = pageCache.evictionCount();
-  pageCache.store(pageCacheKey(spec, targetPage, currentPageBookmarked), frameBuffer);
-  const bool restored = pageCache.restore(originalKey, frameBuffer, false);
+                 false, &pageCacheWorkCancelled);
+  if (!pageCacheWorkCancelled) {
+    pageCache.store(pageCacheKey(spec, targetPage, currentPageBookmarked), frameBuffer);
+  }
+  const bool restored = pageCache.restore(originalKey, frameBuffer);
   section->currentPage = originalPage;
   currentPageBookmarked = originalBookmarked;
   lastPageCacheWorkMs = millis();
@@ -487,11 +487,10 @@ void EpubReaderActivity::precacheNearbyPage() {
     requestUpdate();
     return;
   }
-  if (pageCache.evictionCount() != evictionsBefore) {
-    LOG_DBG("ERS", "Page cache eviction: total=%lu", static_cast<unsigned long>(pageCache.evictionCount()));
+  if (pageCacheWorkCancelled && pageCacheSpinnerVisible) {
+    renderer.displayBuffer(HalDisplay::FAST_REFRESH);
+    pageCacheSpinnerVisible = false;
   }
-  LOG_DBG("ERS", "Idle page cached: spine=%d page=%d in %lums resident=%zu", currentSpineIndex, targetPage,
-          millis() - start, pageCache.size());
 }
 
 void EpubReaderActivity::showBuildPopup(GfxRenderer& renderer, int& pagesUntilFullRefresh) {
@@ -527,6 +526,13 @@ void EpubReaderActivity::loop() {
   if (!epub) {
     finish();
     return;
+  }
+
+  if (pageCacheWorkRequested || pageCacheWorkActive) {
+    int touchX, touchY;
+    if (mappedInput.wasAnyPressed() || mappedInput.wasAnyReleased() || mappedInput.isScreenTouchHeld(touchX, touchY)) {
+      pageCacheWorkCancelled = true;
+    }
   }
 
   // Someone else turned the screen while this reader was stacked (the control
@@ -797,7 +803,7 @@ void EpubReaderActivity::loop() {
   prevTriggered = prevTriggered || touch.prev;
   nextTriggered = nextTriggered || touch.next;
   if (!prevTriggered && !nextTriggered) {
-    precacheNearbyPage();
+    schedulePageCacheWork();
     return;
   }
 
@@ -1545,11 +1551,9 @@ void EpubReaderActivity::renderBook() {
   }
 
   updateBookmarkFlag();
-  const unsigned long pagePrepareStart = millis();
 
   {
-    bool pageDataHit = false;
-    auto p = section->loadReaderPage(section->currentPage, &pageDataHit);
+    auto p = section->loadReaderPage(section->currentPage);
     if (!p) {
       LOG_ERR("ERS", "Failed to load page from SD - clearing section cache");
       automaticPageTurnActive = false;
@@ -1586,32 +1590,17 @@ void EpubReaderActivity::renderBook() {
     const auto key = pageCacheKey(renderSpec, section->currentPage, currentPageBookmarked);
     const bool cacheHit =
         pageCache.enabled() && display.getFrameBuffer() && pageCache.restore(key, display.getFrameBuffer());
-    if (pageCache.enabled()) {
-      LOG_DBG("ERS", "Page cache %s: spine=%d page=%d hits=%lu misses=%lu", cacheHit ? "hit" : "miss",
-              currentSpineIndex, section->currentPage, static_cast<unsigned long>(pageCache.hitCount()),
-              static_cast<unsigned long>(pageCache.missCount()));
-    }
 
     if (cacheHit) {
-      const unsigned long prepared = millis();
       if (forcedRefreshPending) pagesUntilFullRefresh = 1;
       forcedRefreshPending = false;
       ReaderUtils::displayWithRefreshCycle(renderer, pagesUntilFullRefresh);
-      LOG_DBG("ERS", "Page turn framebuffer-hit: data=%s prepare=%lums refresh=%lums", pageDataHit ? "PSRAM" : "SD",
-              prepared - pagePrepareStart, millis() - prepared);
     } else {
       renderContents(std::move(p), orientedMarginTop, orientedMarginRight, orientedMarginBottom, orientedMarginLeft);
       cacheCurrentFrame(renderSpec);
-      LOG_DBG("ERS", "Page turn %s: load+render+refresh=%lums", pageDataHit ? "PSRAM-data-hit" : "SD-data-load",
-              millis() - pagePrepareStart);
     }
     lastRenderCompleteMs = millis();
     lastPageCacheWorkMs = lastRenderCompleteMs;
-  }
-
-  if (BoardConfig::isX4Pro()) {
-    const auto heap = HalMemory::getInternalHeap();
-    LOG_DBG("ERS", "After page turn: internal-free=%zu internal-largest=%zu", heap.freeBytes, heap.largestBlockBytes);
   }
 
   if (currentSpineIndex != lastSavedSpineIndex || section->currentPage != lastSavedPage ||
@@ -1718,7 +1707,8 @@ void EpubReaderActivity::rememberCurrentContentOffset() {
 
 void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int orientedMarginTop,
                                         const int orientedMarginRight, const int orientedMarginBottom,
-                                        const int orientedMarginLeft, const bool refresh) {
+                                        const int orientedMarginLeft, const bool refresh,
+                                        const std::atomic<bool>* cancelled) {
   const auto t0 = millis();
   const int fontId = SETTINGS.getReaderFontId();
   ImageBlock::clearRenderFailures();
@@ -1729,12 +1719,13 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
 
   auto* fcm = renderer.getFontCacheManager();
   auto scope = fcm->createPrewarmScope();
-  page->render(renderer, fontId, orientedMarginLeft, orientedMarginTop);
+  page->render(renderer, fontId, orientedMarginLeft, orientedMarginTop, cancelled);
   // Scan the status bar too: a CJK book/chapter title redirected to the SD
   // fallback font joins the page's single batch prewarm instead of triggering
   // its own SD pass after the scope ends.
   renderStatusBar();
   scope.endScanAndPrewarm();
+  if (cancelled && cancelled->load()) return;
   const auto tPrewarm = millis();
 
   const bool pageHasImages = page->hasImages();
@@ -1746,7 +1737,8 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
     renderer.clearScreen();
   }
 
-  page->render(renderer, fontId, orientedMarginLeft, orientedMarginTop);
+  page->render(renderer, fontId, orientedMarginLeft, orientedMarginTop, cancelled);
+  if (cancelled && cancelled->load()) return;
   renderStatusBar();
   const auto tBwRender = millis();
   if (!refresh) return;

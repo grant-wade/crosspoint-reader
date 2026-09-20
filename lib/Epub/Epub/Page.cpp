@@ -9,8 +9,10 @@ namespace {
 
 template <typename Predicate>
 void renderFilteredPageElements(const std::vector<std::unique_ptr<PageElement>>& elements, GfxRenderer& renderer,
-                                const int fontId, const int xOffset, const int yOffset, Predicate&& predicate) {
+                                const int fontId, const int xOffset, const int yOffset, Predicate&& predicate,
+                                const std::atomic<bool>* cancelled = nullptr) {
   for (const auto& element : elements) {
+    if (cancelled && cancelled->load()) return;
     if (predicate(*element)) {
       element->render(renderer, fontId, xOffset, yOffset);
     }
@@ -128,8 +130,10 @@ std::unique_ptr<PageHorizontalRule> PageHorizontalRule::deserialize(serializatio
   return rule;
 }
 
-void Page::render(GfxRenderer& renderer, const int fontId, const int xOffset, const int yOffset) const {
-  renderFilteredPageElements(elements, renderer, fontId, xOffset, yOffset, [](const PageElement&) { return true; });
+void Page::render(GfxRenderer& renderer, const int fontId, const int xOffset, const int yOffset,
+                  const std::atomic<bool>* cancelled) const {
+  renderFilteredPageElements(
+      elements, renderer, fontId, xOffset, yOffset, [](const PageElement&) { return true; }, cancelled);
 }
 
 void Page::renderImages(GfxRenderer& renderer, const int fontId, const int xOffset, const int yOffset) const {
@@ -191,11 +195,8 @@ bool Page::serialize(HalFile& file) const {
 }
 
 std::unique_ptr<Page> Page::deserialize(HalFile& file) {
-  [[maybe_unused]] const unsigned long started = millis();
   serialization::Input input(file);
-  auto page = deserialize(input);
-  LOG_DBG("PGE", "SD deserialization=%lums", millis() - started);
-  return page;
+  return deserialize(input);
 }
 
 std::unique_ptr<Page> Page::deserialize(serialization::Input& file) {

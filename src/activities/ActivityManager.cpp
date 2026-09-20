@@ -53,24 +53,31 @@ void ActivityManager::renderTaskTrampoline(void* param) {
 void ActivityManager::renderTaskLoop() {
   while (true) {
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-    // Acquire the lock before reading currentActivity to avoid a TOCTOU race
-    // where the main task deletes the activity between the null-check and render().
-    RenderLock lock;
-    if (currentActivity) {
-      HalPowerManager::Lock powerLock;  // Ensure we don't go into low-power mode while rendering
-      // Night mode is a global output polarity applied to every activity.
-      // The sleep screen forces normal polarity itself (SleepActivity).
-      display.setInverted(SETTINGS.screenInverted != 0);
-      currentActivity->render(std::move(lock));
-    }
-    // Notify any task blocked in requestUpdateAndWait() that the render is done.
-    TaskHandle_t waiter = nullptr;
-    taskENTER_CRITICAL(&activityManagerSpinlock);
-    waiter = waitingTaskHandle;
-    waitingTaskHandle = nullptr;
-    taskEXIT_CRITICAL(&activityManagerSpinlock);
-    if (waiter) {
-      xTaskNotify(waiter, 1, eIncrement);
+    while (true) {
+      if (!renderWorkPending.exchange(false)) {
+        if (!backgroundWorkPending.exchange(false)) break;
+        RenderLock lock;
+        if (currentActivity) {
+          HalPowerManager::Lock powerLock;
+          display.setInverted(SETTINGS.screenInverted != 0);
+          currentActivity->runBackgroundWork(std::move(lock));
+        }
+        continue;
+      }
+
+      RenderLock lock;
+      if (currentActivity) {
+        HalPowerManager::Lock powerLock;
+        display.setInverted(SETTINGS.screenInverted != 0);
+        currentActivity->render(std::move(lock));
+      }
+
+      TaskHandle_t waiter = nullptr;
+      taskENTER_CRITICAL(&activityManagerSpinlock);
+      waiter = waitingTaskHandle;
+      waitingTaskHandle = nullptr;
+      taskEXIT_CRITICAL(&activityManagerSpinlock);
+      if (waiter) xTaskNotify(waiter, 1, eIncrement);
     }
   }
 }
@@ -84,6 +91,7 @@ void ActivityManager::loop() {
     // processing a pending action here could re-enable filesystem users while
     // the USB host still owns the raw SD card.
     if (requestedUpdate.exchange(false) && renderTaskHandle) {
+      renderWorkPending = true;
       xTaskNotify(renderTaskHandle, 1, eIncrement);
     }
     return;
@@ -198,6 +206,7 @@ void ActivityManager::loop() {
     // Using direct notification to signal the render task to update
     // Increment counter so multiple rapid calls won't be lost
     if (renderTaskHandle) {
+      renderWorkPending = true;
       xTaskNotify(renderTaskHandle, 1, eIncrement);
     }
   }
@@ -367,6 +376,7 @@ ScreenshotInfo ActivityManager::getScreenshotInfo() const {
 void ActivityManager::requestUpdate(bool immediate) {
   if (immediate) {
     if (renderTaskHandle) {
+      renderWorkPending = true;
       xTaskNotify(renderTaskHandle, 1, eIncrement);
     }
   } else {
@@ -375,6 +385,13 @@ void ActivityManager::requestUpdate(bool immediate) {
     requestedUpdate = true;
   }
 }
+
+void ActivityManager::requestBackgroundWork() {
+  if (!renderTaskHandle) return;
+  backgroundWorkPending = true;
+  xTaskNotify(renderTaskHandle, 1, eIncrement);
+}
+
 void ActivityManager::requestUpdateAndWait() {
   if (!renderTaskHandle) {
     return;
@@ -401,6 +418,7 @@ void ActivityManager::requestUpdateAndWait() {
   // Cannot call while holding RenderLock or it will cause a deadlock
   assert(!holdingRenderLock && "Cannot call requestUpdateAndWait() while holding RenderLock");
 
+  renderWorkPending = true;
   xTaskNotify(renderTaskHandle, 1, eIncrement);
   ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 }

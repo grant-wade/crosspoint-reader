@@ -47,7 +47,6 @@ class PageDataCache {
     for (auto& entry : state[0].entries) {
       if (entry.page >= 0 &&
           (entry.page < currentPage - PREVIOUS || entry.page > currentPage + NEXT || entry.page >= pageCount)) {
-        if (entry.length && entry.loaded == entry.length) state[0].evictions++;
         entry.page = -1;
       }
     }
@@ -71,7 +70,6 @@ class PageDataCache {
 
   Entry& prepare(int page) {
     auto& entry = state[0].entries[page % CAPACITY];
-    if (entry.page >= 0 && entry.page != page && entry.length && entry.loaded == entry.length) state[0].evictions++;
     entry.page = page;
     entry.length = 0;
     entry.loaded = 0;
@@ -79,35 +77,12 @@ class PageDataCache {
     return entry;
   }
 
-  void recordLoad(bool hit) {
-    if (!state) return;
-    if (hit)
-      state[0].hits++;
-    else
-      state[0].misses++;
-  }
-
   bool enabled() const { return state != nullptr; }
   size_t bytesUsed() const { return state ? sizeof(State) : 0; }
-  size_t payloadBytes() const {
-    size_t bytes = 0;
-    if (state) {
-      for (const auto& entry : state[0].entries) {
-        if (entry.page >= 0 && entry.loaded == entry.length) bytes += entry.length;
-      }
-    }
-    return bytes;
-  }
-  uint32_t hits() const { return state ? state[0].hits : 0; }
-  uint32_t misses() const { return state ? state[0].misses : 0; }
-  uint32_t evictions() const { return state ? state[0].evictions : 0; }
 
  private:
   struct State {
     Entry entries[CAPACITY];
-    uint32_t hits;
-    uint32_t misses;
-    uint32_t evictions;
   };
   PsramBuffer<State> state;
   bool attempted = false;

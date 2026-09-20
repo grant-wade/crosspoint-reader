@@ -125,7 +125,7 @@ class Section {
   // the on-disk file (finalized section, or a partial the rebuild hasn't caught up to).
   std::unique_ptr<Page> loadPage(int page);
   // Reader-only fast path. Dictionary and other callers retain loadPage().
-  std::unique_ptr<Page> loadReaderPage(int page, bool* psramHit = nullptr);
+  std::unique_ptr<Page> loadReaderPage(int page);
   static std::unique_ptr<Page> loadPageFromMemory(std::span<const uint8_t> bytes, uint32_t visibleTextOffset);
   // One bounded SD read per idle tick, never called from a requested page turn.
   bool preloadPageData();

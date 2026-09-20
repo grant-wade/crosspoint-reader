@@ -137,11 +137,9 @@ int main() {
     assert(cache.restore({.spineIndex = 3, .pageNumber = 0}, restored));
     for (const uint8_t byte : restored) assert(byte == 0);
     assert(!cache.restore({.spineIndex = 4, .pageNumber = 0}, restored));
-    assert(cache.hitCount() == 1 && cache.missCount() == 1);
 
     std::memset(source, 7, sizeof(source));
     assert(cache.store({.spineIndex = 3, .pageNumber = 7}, source));
-    assert(cache.evictionCount() == 1);
     assert(cache.contains({.spineIndex = 3, .pageNumber = 0}));
     assert(!cache.contains({.spineIndex = 3, .pageNumber = 1}));
 
@@ -182,13 +180,9 @@ int main() {
         for (size_t i = 0; i < entry->length; ++i) assert(entry->bytes[i] == page % 256);
       }
       if (current > 2) assert(!cache.find(current - 3));
-      cache.recordLoad(true);
     }
-    assert(cache.hits() == 300 && cache.evictions() == 297);
-    cache.recordLoad(false);
-    assert(cache.misses() == 1);
     cache.clear();
-    assert(cache.payloadBytes() == 0 && cache.find(299) == nullptr);
+    assert(cache.find(299) == nullptr);
     assert(cache.nextPage(50, 100) == 50);
     auto& oversized = cache.prepare(50);  // A bypassed page isn't retried every idle tick.
     assert(oversized.length == 0 && cache.nextPage(50, 100) == 51);

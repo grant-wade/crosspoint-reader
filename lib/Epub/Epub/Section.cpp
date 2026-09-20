@@ -87,12 +87,6 @@ Section::Section(const std::shared_ptr<Epub>& epub, const int spineIndex, GfxRen
 // persists the pages already laid out as a partial .bin instead of discarding them
 // (no-op once a build has completed or never started).
 Section::~Section() {
-  if (pageDataCache.enabled()) {
-    LOG_DBG("SCT", "Page data summary: hits=%lu SD-avoided=%lu misses=%lu evictions=%lu PSRAM=%zu",
-            static_cast<unsigned long>(pageDataCache.hits()), static_cast<unsigned long>(pageDataCache.hits()),
-            static_cast<unsigned long>(pageDataCache.misses()), static_cast<unsigned long>(pageDataCache.evictions()),
-            pageDataCache.bytesUsed());
-  }
   cancelPagePreload();
   suspendBuild();
 }
@@ -840,9 +834,7 @@ std::unique_ptr<Page> Section::loadPageFromMemory(std::span<const uint8_t> bytes
   return page;
 }
 
-std::unique_ptr<Page> Section::loadReaderPage(const int page, bool* psramHit) {
-  const unsigned long started = millis();
-  if (psramHit) *psramHit = false;
+std::unique_ptr<Page> Section::loadReaderPage(const int page) {
   if (preloadingPage >= 0) {
     pageDataCache.discard(preloadingPage);
     cancelPagePreload();
@@ -852,21 +844,11 @@ std::unique_ptr<Page> Section::loadReaderPage(const int page, bool* psramHit) {
   if (entry && entry->length && entry->loaded == entry->length) {
     auto result = loadPageFromMemory({entry->bytes, entry->length}, entry->visibleTextOffset);
     if (result) {
-      pageDataCache.recordLoad(true);
-      if (psramHit) *psramHit = true;
-      LOG_DBG("SCT",
-              "Page data PSRAM: page=%d deserialize=%lums hits=%lu SD-avoided=%lu misses=%lu evictions=%lu PSRAM=%zu",
-              page, millis() - started, static_cast<unsigned long>(pageDataCache.hits()),
-              static_cast<unsigned long>(pageDataCache.hits()), static_cast<unsigned long>(pageDataCache.misses()),
-              static_cast<unsigned long>(pageDataCache.evictions()), pageDataCache.bytesUsed());
       return result;
     }
     entry->length = 0;
   }
-  pageDataCache.recordLoad(false);
-  auto result = loadPage(page);
-  LOG_DBG("SCT", "Page data SD: page=%d load+deserialize=%lums", page, millis() - started);
-  return result;
+  return loadPage(page);
 }
 
 bool Section::preloadPageData() {
@@ -924,8 +906,6 @@ bool Section::preloadPageData() {
     }
     if (preloadingOffset < HEADER_SIZE || end <= preloadingOffset ||
         end - preloadingOffset > PageDataCache::PAGE_BYTES) {
-      LOG_DBG("SCT", "Page data bypass: page=%d start=%lu end=%lu", page, static_cast<unsigned long>(preloadingOffset),
-              static_cast<unsigned long>(end));
       cancelPagePreload();
       return true;
     }
@@ -947,9 +927,6 @@ bool Section::preloadPageData() {
   }
   entry.loaded += count;
   if (entry.loaded == entry.length) {
-    LOG_DBG("SCT", "Idle page data: page=%d bytes=%lu payload=%zu PSRAM=%zu evictions=%lu", preloadingPage,
-            static_cast<unsigned long>(entry.length), pageDataCache.payloadBytes(), pageDataCache.bytesUsed(),
-            static_cast<unsigned long>(pageDataCache.evictions()));
     cancelPagePreload();
   }
   return true;
