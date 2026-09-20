@@ -422,6 +422,7 @@ void EpubReaderActivity::precacheNearbyPage() {
   const ReaderRenderSpec spec = SETTINGS.readerRenderSpec(buildViewportWidth, buildViewportHeight);
   syncPageCache(spec);
   const auto animateSpinner = [this]() {
+    if (!SETTINGS.showCachingSpinner) return;
     const unsigned long spinnerNow = millis();
     if (pageCacheSpinnerVisible && spinnerNow - lastPageCacheSpinnerMs < SPINNER_FRAME_MS) return;
     GUI.drawBusyIndicator(renderer, pageCacheSpinnerFrame++);
@@ -1297,6 +1298,8 @@ bool EpubReaderActivity::skipLoopDelay() {
 void EpubReaderActivity::renderBook() {
   currentPageLinks.clear();
   if (!epub) return;
+  // A stacked child activity can consume the manager's unbound background notification.
+  pageCacheWorkRequested = false;
   pageCacheSpinnerVisible = false;
   // Runs under the render task's RenderLock; catches every requestUpdate()
   // exit from the overlay while its deferred chrome refresh is still pending.
