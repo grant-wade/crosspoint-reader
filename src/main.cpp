@@ -20,6 +20,7 @@
 #include <XteinkDetect.h>
 #include <builtinFonts/all.h>
 
+#include <cstdlib>
 #include <cstring>
 
 #include "CrossPointSettings.h"
@@ -391,6 +392,10 @@ void setup() {
 #else
   LOG_INF("MAIN", "Device: %s", BoardConfig::ACTIVE.name);
 #endif
+#if FREEINK_DEVICE_X4PRO
+  const auto psram = HalMemory::getPsramHeap();
+  LOG_DBG("MEM", "Startup PSRAM: %zu bytes total, %zu bytes free", psram.totalBytes, psram.freeBytes);
+#endif
 
   // SD Card Initialization
   // We need 6 open files concurrently when parsing a new chapter
@@ -581,6 +586,79 @@ void setup() {
   allowSleepAt = millis() + 2000;
 }
 
+#if defined(ENABLE_SERIAL_LOG) && LOG_LEVEL >= 1
+static void logPsramTestHeap(const char* phase, const HalMemory::HeapStats& internal,
+                             const HalMemory::HeapStats& psram) {
+  LOG_INF("PSRAMTEST", "%s internal: total=%zu free=%zu min=%zu largest=%zu", phase, internal.totalBytes,
+          internal.freeBytes, internal.minFreeBytes, internal.largestBlockBytes);
+  LOG_INF("PSRAMTEST", "%s PSRAM: total=%zu free=%zu min=%zu largest=%zu", phase, psram.totalBytes, psram.freeBytes,
+          psram.minFreeBytes, psram.largestBlockBytes);
+}
+
+static void runPsramTest() {
+  constexpr size_t TEST_BYTES = 1024 * 1024;
+  constexpr size_t WORD_COUNT = TEST_BYTES / sizeof(uint32_t);
+  // Allow small concurrent task/logging allocations; compare idle runs for cumulative leaks.
+  constexpr int HEAP_TOLERANCE = 4096;
+  // TLSF size-class rounding with heap poisoning can add ~32 KiB to a 1 MiB request.
+  constexpr int ALLOCATION_OVERHEAD_LIMIT = 64 * 1024;
+  const auto internalBefore = HalMemory::getInternalHeap();
+  const auto psramBefore = HalMemory::getPsramHeap();
+  logPsramTestHeap("before", internalBefore, psramBefore);
+
+  auto buffer = makePsramBuffer<uint32_t>(WORD_COUNT);
+  if (!buffer) {
+    LOG_ERR("PSRAMTEST", "FAIL: 1 MiB allocation failed (hasPsram=%d)", HalMemory::hasPsram());
+    return;
+  }
+  const auto internalAllocated = HalMemory::getInternalHeap();
+  const auto psramAllocated = HalMemory::getPsramHeap();
+  logPsramTestHeap("allocated", internalAllocated, psramAllocated);
+
+  // Volatile forces the verification pass to read the buffer back from memory.
+  volatile uint32_t* words = buffer.get();
+  for (size_t i = 0; i < WORD_COUNT; ++i) {
+    words[i] = 0xA5C39E71U ^ (static_cast<uint32_t>(i) * 2654435761U);
+    if ((i + 1) % 4096 == 0) {
+      delay(1);
+    }
+  }
+  bool patternOk = true;
+  for (size_t i = 0; i < WORD_COUNT; ++i) {
+    const uint32_t expected = 0xA5C39E71U ^ (static_cast<uint32_t>(i) * 2654435761U);
+    const uint32_t actual = words[i];
+    if (actual != expected) {
+      LOG_ERR("PSRAMTEST", "Pattern mismatch at word %zu: expected=%08lx actual=%08lx", i,
+              static_cast<unsigned long>(expected), static_cast<unsigned long>(actual));
+      patternOk = false;
+      break;
+    }
+    if ((i + 1) % 4096 == 0) {
+      delay(1);
+    }
+  }
+  buffer.reset();
+  const auto internalAfter = HalMemory::getInternalHeap();
+  const auto psramAfter = HalMemory::getPsramHeap();
+  logPsramTestHeap("freed", internalAfter, psramAfter);
+
+  const int internalUsed = static_cast<int>(internalBefore.freeBytes) - static_cast<int>(internalAllocated.freeBytes);
+  const int psramUsed = static_cast<int>(psramBefore.freeBytes) - static_cast<int>(psramAllocated.freeBytes);
+  const int internalLoss = static_cast<int>(internalBefore.freeBytes) - static_cast<int>(internalAfter.freeBytes);
+  const int psramLoss = static_cast<int>(psramBefore.freeBytes) - static_cast<int>(psramAfter.freeBytes);
+  LOG_INF("PSRAMTEST", "Allocated: internal=%d PSRAM=%d (overhead=%d); after free loss: internal=%d PSRAM=%d",
+          internalUsed, psramUsed, psramUsed - static_cast<int>(TEST_BYTES), internalLoss, psramLoss);
+  if (patternOk && std::abs(internalUsed) <= HEAP_TOLERANCE &&
+      psramUsed >= static_cast<int>(TEST_BYTES) - HEAP_TOLERANCE &&
+      psramUsed <= static_cast<int>(TEST_BYTES) + ALLOCATION_OVERHEAD_LIMIT &&
+      std::abs(internalLoss) <= HEAP_TOLERANCE && std::abs(psramLoss) <= HEAP_TOLERANCE) {
+    LOG_INF("PSRAMTEST", "PASS: 1 MiB pattern verified and heap restored");
+  } else {
+    LOG_ERR("PSRAMTEST", "FAIL: pattern=%s or heap delta outside tolerance", patternOk ? "OK" : "BAD");
+  }
+}
+#endif
+
 void loop() {
   static unsigned long maxLoopDuration = 0;
   const unsigned long loopStartTime = millis();
@@ -635,6 +713,11 @@ void loop() {
         logSerial.write(buf, bufferSize);
         logSerial.printf("SCREENSHOT_END\n");
       }
+#if defined(ENABLE_SERIAL_LOG) && LOG_LEVEL >= 1
+      else if (cmd == "PSRAMTEST") {
+        runPsramTest();
+      }
+#endif
     }
   }
 
