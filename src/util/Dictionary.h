@@ -45,6 +45,8 @@ class Dictionary {
 
   // Resolve the dictionary folder and validate its files. Rejects
   // dictionaries with 64-bit index offsets (idxoffsetbits=64 in .ifo).
+  // Reopening the currently configured folder is a no-op so any resident
+  // lookup acceleration owned by this instance survives repeated lookups.
   bool open(const char* folderName);
   bool isOpen() const { return !basePath.empty(); }
 
@@ -108,6 +110,7 @@ class Dictionary {
   // elsewhere: cleanWord(), stemVariants() and the matched headword.) False
   // (and logs) when the path would not fit, which open() has already ruled out.
   bool buildPath(char* buf, size_t bufSize, const char* suffix) const;
+  bool isOpenFor(const char* folderName) const;
 
   // The .idx / .qidx handles shared by every locate() call in one lookup. A
   // lookup probes up to ~5 stem variants; opening the two files per probe cost

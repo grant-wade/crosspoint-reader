@@ -501,7 +501,8 @@ void EpubReaderActivity::showBuildPopup(GfxRenderer& renderer, int& pagesUntilFu
   buildPopupPending = false;
 }
 
-void EpubReaderActivity::openDictionaryWordSelect() {
+void EpubReaderActivity::openDictionaryWordSelect(
+    const std::optional<DictionaryWordSelectActivity::InitialLookup> initialLookup) {
   if (SETTINGS.dictionaryName[0] == '\0') {
     showDictionaryMessage = true;
     dictionaryMessageTime = millis();
@@ -518,9 +519,13 @@ void EpubReaderActivity::openDictionaryWordSelect() {
   orientedMarginTop += SETTINGS.screenMargin;
   orientedMarginLeft += SETTINGS.screenMargin;
 
-  startActivityForResult(std::make_unique<DictionaryWordSelectActivity>(renderer, mappedInput, std::move(page),
-                                                                        orientedMarginLeft, orientedMarginTop),
-                         [this](const ActivityResult&) { requestUpdate(); });
+  auto activity = makeUniqueNoThrow<DictionaryWordSelectActivity>(
+      renderer, mappedInput, readerDictionary, std::move(page), orientedMarginLeft, orientedMarginTop, initialLookup);
+  if (!activity) {
+    LOG_ERR("ERS", "OOM: dictionary word-select activity");
+    return;
+  }
+  startActivityForResult(std::move(activity), [this](const ActivityResult&) { requestUpdate(); });
 }
 
 void EpubReaderActivity::loop() {
@@ -621,6 +626,17 @@ void EpubReaderActivity::loop() {
     discardOverlayPage();
     requestUpdate();
     return;
+  }
+
+  if (!atEndOfBook && section && mappedInput.hasTouch()) {
+    int touchX = 0;
+    int touchY = 0;
+    if (mappedInput.wasScreenLongPress(touchX, touchY)) {
+      automaticPageTurnActive = false;
+      openDictionaryWordSelect(
+          DictionaryWordSelectActivity::InitialLookup{static_cast<int16_t>(touchX), static_cast<int16_t>(touchY)});
+      return;
+    }
   }
 
   switch (mappedInput.homeButtonAction()) {

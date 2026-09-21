@@ -4,6 +4,7 @@
 #include <I18n.h>
 
 #include <memory>
+#include <optional>
 #include <vector>
 
 #include "activities/Activity.h"
@@ -15,12 +16,20 @@
 // touch-down moves the highlight and a tap on a word looks it up directly.
 class DictionaryWordSelectActivity final : public Activity {
  public:
-  explicit DictionaryWordSelectActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
-                                        std::unique_ptr<Page> page, int marginLeft, int marginTop)
+  struct InitialLookup {
+    int16_t x;
+    int16_t y;
+  };
+
+  explicit DictionaryWordSelectActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, Dictionary& dict,
+                                        std::unique_ptr<Page> page, int marginLeft, int marginTop,
+                                        std::optional<InitialLookup> initialLookup = std::nullopt)
       : Activity("DictionaryWordSelect", renderer, mappedInput),
+        dict(dict),
         page(std::move(page)),
         marginLeft(marginLeft),
-        marginTop(marginTop) {}
+        marginTop(marginTop),
+        initialLookup(initialLookup) {}
 
   void onEnter() override;
   void loop() override;
@@ -48,9 +57,12 @@ class DictionaryWordSelectActivity final : public Activity {
   bool drawHighlightWithSnapshot();
   void drawHints() const;
 
+  Dictionary& dict;
   std::unique_ptr<Page> page;
   const int marginLeft;
   const int marginTop;
+  const std::optional<InitialLookup> initialLookup;
+  bool automaticLookupPending = false;
   int fontId = 0;
   int lineHeight = 0;
 
@@ -59,7 +71,6 @@ class DictionaryWordSelectActivity final : public Activity {
   uint16_t rowCount = 0;
   unsigned long lastHorizontalMoveTime = 0;
 
-  Dictionary dict;
   bool dictOpenAttempted = false;
   bool dictOpenOk = false;
   bool dictNeedsIndex = false;

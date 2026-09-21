@@ -12,6 +12,7 @@
 
 #include "BookmarkEntry.h"
 #include "ChapterPosition.h"
+#include "DictionaryWordSelectActivity.h"
 #include "EpubReaderMenuActivity.h"
 #include "ProgressMapper.h"
 #include "ReaderActivity.h"
@@ -45,6 +46,7 @@ class EpubReaderActivity final : public ReaderActivity {
   bool showBookmarkMessage = false;
   bool showDictionaryMessage = false;
   unsigned long dictionaryMessageTime = 0UL;
+  Dictionary readerDictionary;
   bool currentPageBookmarked = false;
   unsigned long lastRenderCompleteMs = 0;
   unsigned long lastPageCacheWorkMs = 0;
@@ -181,7 +183,8 @@ class EpubReaderActivity final : public ReaderActivity {
   std::string moreRowName(int row) const;
   std::string moreRowValue(int row) const;
   void activateMoreRow(int row);
-  void openDictionaryWordSelect();
+  void openDictionaryWordSelect(
+      std::optional<DictionaryWordSelectActivity::InitialLookup> initialLookup = std::nullopt);
   bool launchKOReaderSync();
   unsigned long confirmLongPressThreshold() const;
   void toggleAutoPageTurn(uint8_t selectedPageTurnOption);

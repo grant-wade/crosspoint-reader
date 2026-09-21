@@ -95,6 +95,8 @@ IfoFacts readIfoFacts(const std::string& ifoPath) {
 }  // namespace
 
 bool Dictionary::open(const char* folderName) {
+  if (isOpenFor(folderName)) return true;
+
   basePath.clear();
   hasSyn = false;
   htmlDefinitions = false;
@@ -129,6 +131,16 @@ bool Dictionary::open(const char* folderName) {
 
   basePath = std::move(resolved);
   return true;
+}
+
+bool Dictionary::isOpenFor(const char* folderName) const {
+  if (!folderName || !isOpen()) return false;
+  const char* stem = strrchr(basePath.c_str(), '/');
+  if (!stem) return false;
+  const char* folder = stem;
+  while (folder > basePath.c_str() && folder[-1] != '/') folder--;
+  const size_t folderLength = static_cast<size_t>(stem - folder);
+  return strlen(folderName) == folderLength && strncmp(folder, folderName, folderLength) == 0;
 }
 
 bool Dictionary::buildPath(char* buf, size_t bufSize, const char* suffix) const {

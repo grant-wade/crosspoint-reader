@@ -50,9 +50,17 @@ void DictionaryWordSelectActivity::onEnter() {
   // full-repaint path as the fallback.
   snapshot = makeUniqueNoThrow<uint8_t[]>(SNAPSHOT_CAPACITY);
   extractWords();
-  // Start on the middle row's word nearest mid-screen instead of top-left:
-  // any word on the page is then at most half a page of moves away.
-  if (!words.empty()) {
+  if (initialLookup) {
+    const int hit = wordAt(initialLookup->x, initialLookup->y);
+    if (hit < 0) {
+      finish();
+      return;
+    }
+    selected = hit;
+    automaticLookupPending = true;
+  } else if (!words.empty()) {
+    // Start on the middle row's word nearest mid-screen instead of top-left:
+    // any word on the page is then at most half a page of moves away.
     const int initial = closestInRow(rowCount / 2, renderer.getScreenWidth() / 2);
     if (initial >= 0) selected = initial;
   }
@@ -179,10 +187,22 @@ void DictionaryWordSelectActivity::performLookup() {
 
   if (found) {
     popup = Popup::None;
-    startActivityForResult(
-        std::make_unique<DictionaryDefinitionActivity>(renderer, mappedInput, std::move(headword),
-                                                       std::move(definition), dict.definitionsAreHtml()),
-        [this](const ActivityResult&) { requestUpdate(); });
+    auto activity = makeUniqueNoThrow<DictionaryDefinitionActivity>(renderer, mappedInput, std::move(headword),
+                                                                    std::move(definition), dict.definitionsAreHtml());
+    if (!activity) {
+      LOG_ERR("DICT", "OOM: dictionary definition activity");
+      popup = Popup::Error;
+      popupMsg = StrId::STR_DICT_LOW_MEMORY;
+      popupTime = millis();
+      requestUpdate();
+      return;
+    }
+    startActivityForResult(std::move(activity), [this](const ActivityResult&) {
+      if (initialLookup)
+        finish();
+      else
+        requestUpdate();
+    });
     return;
   }
   // Name the failure: a genuine miss is "Not found"; a word that WAS found but
@@ -232,9 +252,19 @@ void DictionaryWordSelectActivity::performLookup() {
 void DictionaryWordSelectActivity::loop() {
   if (popup == Popup::NotFound || popup == Popup::Error) {
     if (millis() - popupTime >= POPUP_DURATION_MS) {
-      popup = Popup::None;
-      requestUpdate();
+      if (initialLookup) {
+        finish();
+      } else {
+        popup = Popup::None;
+        requestUpdate();
+      }
     }
+    return;
+  }
+
+  if (automaticLookupPending) {
+    automaticLookupPending = false;
+    performLookup();
     return;
   }
 
